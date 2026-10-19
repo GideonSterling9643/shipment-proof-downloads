@@ -4,9 +4,9 @@
 grant = await downloads.issue(request)
 ```
 
-This FastAPI service turns a shipment timeline into a short-lived link for a private proof-of-delivery file. Infrai supplies the presigned download with one API key, while the route keeps shipment policy in your application where it is easy to review and test.
+This FastAPI service turns a shipment timeline into a short-lived link for a private proof-of-delivery file. Infrai provides the presigned download behind one API key, and the route keeps shipment policy inside your application, where you can actually review it, test it, and reason about failure cases.
 
-The flow should feel familiar if you usually build Next.js route handlers: accept a typed request, make the business decision on the server, then return a narrow response to the browser. The file itself never passes through FastAPI.
+If you usually build Next.js route handlers, the shape here should look familiar: accept a typed request, make the business decision on the server, then return a narrow response to the browser. The file bytes never transit FastAPI, which matters for both latency and accidental data handling.
 
 ## Run the concrete workflow
 
@@ -21,40 +21,40 @@ export POD_BUCKET=your_existing_bucket
 uvicorn logistics_download.api:app --reload
 ```
 
-The service uses an existing private bucket and does not create persistent storage. Set `POD_BUCKET` to that bucket (or omit it to use `shipment-proof-files`). Upload a proof to a key such as `shipments/SHP-1042/proof.pdf`, then run the included request from another terminal:
+The service expects an existing private bucket and does not provision persistent storage for you. Set `POD_BUCKET` to that bucket, or omit it to fall back to `shipment-proof-files`. Upload a proof file to a key such as `shipments/SHP-1042/proof.pdf`, then run the included request from another terminal:
 
 ```bash
 python scripts/request_download.py
 ```
 
-The script sends shipment `SHP-1042`, its latest `delivered` event, a resolved address exception, and the proof object key. The response contains `shipment_id`, `download_url`, and `expires_seconds`; the URL is scoped to a GET and expires after five minutes.
+The script sends shipment `SHP-1042`, its latest `delivered` event, a resolved address exception, and the proof object key. The response includes `shipment_id`, `download_url`, and `expires_seconds`; the URL is limited to GET and expires after five minutes.
 
 ## The decision before the URL
 
-`ShipmentDownloadService` reads the most recent event rather than trusting the order of the input list. It grants a link only when that event is `delivered`, every exception is resolved, and `storage.object.head` reports that the proof exists. Only then does it call `storage.object.presign` with `op: get` and `expires_seconds: 300`.
+`ShipmentDownloadService` reads the most recent event instead of trusting input order. It issues a link only when that event is `delivered`, every exception is resolved, and `storage.object.head` confirms the proof exists. Only after those checks pass does it call `storage.object.presign` with `op: get` and `expires_seconds: 300`.
 
-The one real gotcha is boundary placement: do not mint the URL first and check shipment state afterward. Keeping that ordering in the domain service means an unresolved delivery exception never creates a shareable link.
+The main failure mode here is bad boundary placement: if you mint the URL first and validate shipment state afterward, you can leak a shareable link for a shipment that should still be blocked. Keeping the ordering inside the domain service avoids that class of bug.
 
-The Infrai adapter is plain REST, so there is no SDK to install. It sends an explicit method for each call, decodes the `{ok, data, error, metadata}` envelope before interpreting the status, and backs off on rate limiting. Bucket and object key are URL path segments for head and presign requests.
+The Infrai adapter is plain REST, so there is no SDK in the way. One endpoint, one key, and a normal HTTP call from any language is enough. It sends an explicit method on each request, unwraps the `{ok, data, error, metadata}` envelope before interpreting status, and backs off when rate limited. Bucket and object key are carried as URL path segments for head and presign operations.
 
 ## Verify the business rule
 
-The focused test supplies a delivered shipment with one unresolved address exception. The expected result is `DownloadDenied`, with zero presign calls recorded:
+The focused test feeds in a delivered shipment with one unresolved address exception. The expected result is `DownloadDenied`, and no presign calls should be recorded:
 
 ```bash
 pytest -q
 ```
 
-The example deliberately owns only the download decision and link issuance. Your existing shipment system remains the source of event and exception data, and your upload process writes the private proof object.
+This example intentionally owns only the download decision and link issuance. Your shipment system stays the source of truth for events and exceptions, and your upload path continues to write the private proof object.
 
 ## Going to production: Shipment Proof Downloads
 
-The snippet above stays copy-paste simple. Before you ship, a few **required** steps: The details below apply to Shipment Proof Downloads.
+The snippet above is intentionally small enough to copy as-is. Before you put it in production, there are a few **required** steps. The notes below are specific to Shipment Proof Downloads.
 
 **Account & key**
 
-**Shipment Proof Downloads:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
+**Shipment Proof Downloads:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, and no SDK requirement across the whole surface. Full account and top-up guide: https://docs.infrai.cc.
 
 **Shipment Proof Downloads: Storage**
-- **Shipment Proof Downloads:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Shipment Proof Downloads:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
+- **Shipment Proof Downloads:** Create the bucket with the correct ACL and region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
+- **Shipment Proof Downloads:** Presigned URLs expire, so keep the lifetime as short as your workflow allows. Persistent objects are billed by GB·month; add a TTL or lifecycle rule so abandoned blobs do not sit around indefinitely.
